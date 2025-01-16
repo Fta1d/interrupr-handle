@@ -1,29 +1,27 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
 #include "driver/gpio.h"
+#include "esp_timer.h"
 
 #define LED_PIN GPIO_NUM_18
 #define BUTTON_PIN GPIO_NUM_19
 
-static QueueHandle_t gpio_evt_queue = NULL;
+static esp_timer_handle_t debounce_timer;
+static volatile bool button_pressed = false;
+static volatile bool led_state = false;
 
-static void IRAM_ATTR button_isr_handler(void* arg) {
-    int pin = (int)arg;
-    xQueueSendFromISR(gpio_evt_queue, &pin, NULL);
+void IRAM_ATTR debounce_timer_callback(void *arg) {
+    if (gpio_get_level(BUTTON_PIN) == 0) {
+        led_state = !led_state;
+        gpio_set_level(LED_PIN, led_state);
+    }
+    button_pressed = false;
 }
 
-void button_task(void* arg) {
-    int pin;
-    static int led_state = 0;
-
-    while (true) {
-        if (xQueueReceive(gpio_evt_queue, &pin, portMAX_DELAY)) {
-            led_state = !led_state;
-            gpio_set_level(LED_PIN, led_state);
-            printf("Button pressed, LED state toggled to: %d\n", led_state);
-        }
+void gpio_isr_handler(void *arg) {
+    if (!button_pressed) {
+        button_pressed = true;
+        esp_timer_start_once(debounce_timer, 50000);
     }
 }
 
@@ -35,13 +33,16 @@ void app_main(void) {
     gpio_reset_pin(BUTTON_PIN);
     gpio_set_direction(BUTTON_PIN, GPIO_MODE_INPUT);
     gpio_set_pull_mode(BUTTON_PIN, GPIO_PULLUP_ONLY);
-
     gpio_set_intr_type(BUTTON_PIN, GPIO_INTR_NEGEDGE);
 
-    gpio_evt_queue = xQueueCreate(10, sizeof(int));
-
-    xTaskCreate(button_task, "button_task", 2048, NULL, 10, NULL);
+    esp_timer_create_args_t timer_args = {
+        .callback = debounce_timer_callback,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "debounce_timer"};
+    esp_timer_create(&timer_args, &debounce_timer);
 
     gpio_install_isr_service(0);
-    gpio_isr_handler_add(BUTTON_PIN, button_isr_handler, (void*)BUTTON_PIN);
+    gpio_isr_handler_add(BUTTON_PIN, gpio_isr_handler, NULL);
+
 }
